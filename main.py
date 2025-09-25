@@ -1,11 +1,103 @@
 from typing import List, Tuple, Optional
 import time
+import random
+import math
 # from local_driver import Alg3D, Board # Для локального тестирования
 from framework import Alg3D, Board # Для финальной отправки
 
+class MCTSNode:
+    """Узел дерева MCTS"""
+    def __init__(self, state: List[List[List[int]]], parent=None, action=None):
+        self.state = [[[cell for cell in row] for row in level] for level in state]
+        self.parent = parent
+        self.action = action  # (x, y) действие, которое привело к этому состоянию
+        self.children = []
+        self.visits = 0
+        self.wins = 0.0
+        self.untried_actions = []
+        self.player = None  # будет установлено при создании
+        
+    def is_fully_expanded(self):
+        return len(self.untried_actions) == 0
+    
+    def is_terminal(self):
+        return len(self.get_legal_actions()) == 0 or self.check_winner() is not None
+    
+    def get_legal_actions(self):
+        """Получить все возможные действия"""
+        actions = []
+        for x in range(4):
+            for y in range(4):
+                if self.can_place_piece(x, y):
+                    actions.append((x, y))
+        return actions
+    
+    def can_place_piece(self, x: int, y: int) -> bool:
+        """Проверить, можно ли поставить фишку в (x, y)"""
+        for z in range(4):
+            if self.state[z][y][x] == 0:
+                return True
+        return False
+    
+    def place_piece(self, x: int, y: int, player: int) -> Optional[int]:
+        """Поставить фишку и вернуть Z координату"""
+        for z in range(4):
+            if self.state[z][y][x] == 0:
+                self.state[z][y][x] = player
+                return z
+        return None
+    
+    def check_winner(self) -> Optional[int]:
+        """Проверить победителя"""
+        # Все выигрышные линии
+        lines = []
+        
+        # Вертикальные
+        for x in range(4):
+            for y in range(4):
+                lines.append([(x, y, z) for z in range(4)])
+        
+        # Горизонтальные
+        for z in range(4):
+            for y in range(4):
+                for x in range(1):
+                    lines.append([(x+i, y, z) for i in range(4)])
+            for x in range(4):
+                for y in range(1):
+                    lines.append([(x, y+i, z) for i in range(4)])
+        
+        # Диагонали
+        for z in range(4):
+            lines.append([(i, i, z) for i in range(4)])
+            lines.append([(i, 3-i, z) for i in range(4)])
+        
+        for y in range(4):
+            lines.append([(i, y, i) for i in range(4)])
+            lines.append([(i, y, 3-i) for i in range(4)])
+        
+        for x in range(4):
+            lines.append([(x, i, i) for i in range(4)])
+            lines.append([(x, i, 3-i) for i in range(4)])
+        
+        # 3D диагонали
+        lines.extend([
+            [(i, i, i) for i in range(4)],
+            [(i, i, 3-i) for i in range(4)],
+            [(i, 3-i, i) for i in range(4)],
+            [(3-i, i, i) for i in range(4)]
+        ])
+        
+        for line in lines:
+            first_cell = self.state[line[0][2]][line[0][1]][line[0][0]]
+            if first_cell != 0:
+                if all(self.state[z][y][x] == first_cell for x, y, z in line):
+                    return first_cell
+        
+        return None
+
 class MyAI(Alg3D):
     def __init__(self):
-        self.board_size = 4
+        self.computation_time = 8.0  # Используем почти всё время
         
     def get_move(
         self,
@@ -13,306 +105,333 @@ class MyAI(Alg3D):
         player: int,
         last_move: Tuple[int, int, int]
     ) -> Tuple[int, int]:
-        """Исправленный ИИ с правильной логикой Connect 4"""
+        """MCTS ИИ основанный на мировых исследованиях"""
         
         try:
-            # 1. Проверяем, можем ли выиграть немедленно
-            winning_move = self.find_immediate_win(board, player)
-            if winning_move:
-                return winning_move
+            # КРИТИЧЕСКИЕ ПРОВЕРКИ СНАЧАЛА
+            
+            # 1. Немедленная победа
+            win_move = self.find_immediate_win(board, player)
+            if win_move:
+                return win_move
                 
-            # 2. КРИТИЧНО: блокируем выигрыш противника
+            # 2. Блокировка противника
             opponent = 3 - player
             block_move = self.find_immediate_win(board, opponent)
             if block_move:
                 return block_move
-                
-            # 3. Ищем лучший стратегический ход
-            best_move = self.find_best_strategic_move(board, player)
-            if best_move:
-                return best_move
-                
-            # 4. Запасной ход
-            return self.safe_fallback_move(board)
+            
+            # 3. Если первый ход - играем в центр (научно доказано!)
+            if self.is_first_move(board) and player == 1:
+                center_moves = [(1, 1), (2, 2), (1, 2), (2, 1)]
+                for x, y in center_moves:
+                    if self.can_place_piece(board, x, y):
+                        return (x, y)
+                        
+            # 4. MCTS поиск лучшего хода
+            best_move = self.mcts_search(board, player)
+            return best_move if best_move else self.safe_fallback(board)
             
         except Exception:
-            return self.emergency_move(board)
+            return self.safe_fallback(board)
 
-    def find_immediate_win(self, board: List[List[List[int]]], player: int) -> Optional[Tuple[int, int]]:
-        """Поиск немедленного выигрыша или блокировки"""
+    def mcts_search(self, board: List[List[List[int]]], player: int) -> Optional[Tuple[int, int]]:
+        """Monte Carlo Tree Search - сердце алгоритма"""
         
-        for x in range(4):
-            for y in range(4):
-                # Находим, куда упадёт фишка
-                drop_z = self.get_drop_position(board, x, y)
-                if drop_z is None:
-                    continue
-                    
-                # Проверяем, выиграем ли мы этим ходом
-                board[drop_z][y][x] = player
-                if self.check_winner_simple(board, player):
-                    board[drop_z][y][x] = 0  # откатываем
-                    return (x, y)
-                board[drop_z][y][x] = 0  # откатываем
+        try:
+            root = MCTSNode(board)
+            root.player = player
+            root.untried_actions = root.get_legal_actions()
+            
+            start_time = time.time()
+            iterations = 0
+            
+            # Итерации MCTS
+            while time.time() - start_time < self.computation_time:
+                # 1. SELECTION - выбираем лучший узел для расширения
+                leaf = self.select(root)
                 
-        return None
-
-    def get_drop_position(self, board: List[List[List[int]]], x: int, y: int) -> Optional[int]:
-        """Находит позицию Z, куда упадёт фишка в колонке (x, y)"""
-        if not (0 <= x < 4 and 0 <= y < 4):
+                # 2. EXPANSION - расширяем если возможно
+                if not leaf.is_terminal() and leaf.untried_actions:
+                    leaf = self.expand(leaf)
+                
+                # 3. SIMULATION - симуляция до конца игры
+                result = self.simulate(leaf)
+                
+                # 4. BACKPROPAGATION - распространяем результат
+                self.backpropagate(leaf, result, player)
+                
+                iterations += 1
+            
+            # Выбираем лучший ход
+            if not root.children:
+                return None
+                
+            # Ребёнок с наивысшим win rate
+            best_child = max(root.children, key=lambda c: c.wins / c.visits if c.visits > 0 else 0)
+            return best_child.action
+            
+        except Exception:
             return None
-            
-        for z in range(4):  # начинаем снизу (z=0)
-            if board[z][y][x] == 0:
-                return z
-        return None  # колонка полная
 
-    def check_winner_simple(self, board: List[List[List[int]]], player: int) -> bool:
-        """Простая и надёжная проверка победителя"""
+    def select(self, node: MCTSNode) -> MCTSNode:
+        """SELECTION: спускаемся по дереву, выбирая лучшие узлы"""
         
-        # 1. ВЕРТИКАЛЬНЫЕ ЛИНИИ (самые важные в Connect 4!)
-        for x in range(4):
-            for y in range(4):
-                count = 0
-                for z in range(4):
-                    if board[z][y][x] == player:
-                        count += 1
-                    else:
-                        count = 0
-                    if count >= 4:
-                        return True
+        while not node.is_terminal():
+            if not node.is_fully_expanded():
+                return node
+            else:
+                node = self.best_child_ucb1(node)
+        return node
+
+    def best_child_ucb1(self, node: MCTSNode, c: float = 1.4) -> MCTSNode:
+        """Выбор лучшего ребёнка по UCB1 формуле"""
         
-        # 2. ГОРИЗОНТАЛЬНЫЕ ЛИНИИ в плоскости XY
+        def ucb1_value(child):
+            if child.visits == 0:
+                return float('inf')  # Неизученные узлы имеют высший приоритет
+            
+            exploitation = child.wins / child.visits
+            exploration = c * math.sqrt(math.log(node.visits) / child.visits)
+            return exploitation + exploration
+        
+        return max(node.children, key=ucb1_value)
+
+    def expand(self, node: MCTSNode) -> MCTSNode:
+        """EXPANSION: добавляем новый узел в дерево"""
+        
+        action = node.untried_actions.pop()
+        x, y = action
+        
+        # Создаём новое состояние
+        new_state = [[[cell for cell in row] for row in level] for level in node.state]
+        current_player = self.get_current_player(new_state)
+        
+        # Применяем действие
         for z in range(4):
-            # По оси X
-            for y in range(4):
-                count = 0
-                for x in range(4):
-                    if board[z][y][x] == player:
-                        count += 1
-                    else:
-                        count = 0
-                    if count >= 4:
-                        return True
-            
-            # По оси Y  
-            for x in range(4):
-                count = 0
-                for y in range(4):
-                    if board[z][y][x] == player:
-                        count += 1
-                    else:
-                        count = 0
-                    if count >= 4:
-                        return True
+            if new_state[z][y][x] == 0:
+                new_state[z][y][x] = current_player
+                break
         
-        # 3. ДИАГОНАЛИ в плоскости XY
-        for z in range(4):
-            # Главная диагональ
-            if all(board[z][i][i] == player for i in range(4)):
-                return True
-            # Побочная диагональ  
-            if all(board[z][i][3-i] == player for i in range(4)):
-                return True
+        # Создаём новый узел
+        child = MCTSNode(new_state, parent=node, action=action)
+        child.player = 3 - current_player  # следующий игрок
+        child.untried_actions = child.get_legal_actions()
         
-        # 4. ДИАГОНАЛИ в плоскости XZ
-        for y in range(4):
-            # Главная диагональ XZ
-            if all(board[i][y][i] == player for i in range(4)):
-                return True
-            # Побочная диагональ XZ
-            if all(board[i][y][3-i] == player for i in range(4)):
-                return True
-        
-        # 5. ДИАГОНАЛИ в плоскости YZ
-        for x in range(4):
-            # Главная диагональ YZ
-            if all(board[i][i][x] == player for i in range(4)):
-                return True
-            # Побочная диагональ YZ
-            if all(board[i][3-i][x] == player for i in range(4)):
-                return True
-        
-        # 6. ПРОСТРАНСТВЕННЫЕ ДИАГОНАЛИ
-        # Главная диагональ куба
-        if all(board[i][i][i] == player for i in range(4)):
-            return True
-        # Другие пространственные диагонали
-        if all(board[i][i][3-i] == player for i in range(4)):
-            return True
-        if all(board[i][3-i][i] == player for i in range(4)):
-            return True
-        if all(board[3-i][i][i] == player for i in range(4)):
-            return True
-        
-        return False
+        node.children.append(child)
+        return child
 
-    def find_best_strategic_move(self, board: List[List[List[int]]], player: int) -> Optional[Tuple[int, int]]:
-        """Поиск лучшего стратегического хода"""
+    def simulate(self, node: MCTSNode) -> int:
+        """SIMULATION: случайная симуляция до конца игры"""
         
-        best_score = float('-inf')
-        best_move = None
-        opponent = 3 - player
+        # Копируем состояние
+        state = [[[cell for cell in row] for row in level] for level in node.state]
+        current_player = self.get_current_player(state)
         
-        # Оцениваем все доступные ходы
-        for x in range(4):
-            for y in range(4):
-                drop_z = self.get_drop_position(board, x, y)
-                if drop_z is None:
-                    continue
-                
-                # Делаем пробный ход
-                board[drop_z][y][x] = player
-                
-                # Оцениваем позицию
-                score = self.evaluate_position_advanced(board, player, opponent)
-                
-                # Добавляем бонусы
-                score += self.get_position_bonus(x, y, drop_z)
-                
-                board[drop_z][y][x] = 0  # откатываем
-                
-                if score > best_score:
-                    best_score = score
-                    best_move = (x, y)
-        
-        return best_move
-
-    def evaluate_position_advanced(self, board: List[List[List[int]]], player: int, opponent: int) -> int:
-        """Продвинутая оценка позиции"""
-        score = 0
-        
-        # Оцениваем все возможные линии из 4 позиций
-        all_lines = self.get_all_possible_lines()
-        
-        for line in all_lines:
-            our_count = 0
-            their_count = 0
-            empty_count = 0
+        # Играем до конца случайными ходами
+        for _ in range(100):  # лимит на случай зацикливания
+            winner = self.check_winner_state(state)
+            if winner is not None:
+                return winner
             
-            for x, y, z in line:
-                if not (0 <= x < 4 and 0 <= y < 4 and 0 <= z < 4):
+            # Получаем доступные ходы
+            actions = self.get_legal_actions_state(state)
+            if not actions:
+                return 0  # ничья
+            
+            # Случайный ход (с лёгким улучшением - приоритет центру)
+            action = self.smart_random_action(state, actions, current_player)
+            x, y = action
+            
+            # Применяем ход
+            for z in range(4):
+                if state[z][y][x] == 0:
+                    state[z][y][x] = current_player
                     break
-                
-                cell = board[z][y][x]
-                if cell == player:
-                    our_count += 1
-                elif cell == opponent:
-                    their_count += 1
-                else:
-                    empty_count += 1
-            else:  # если цикл завершился без break
-                # Оцениваем линию только если она не заблокирована
-                if our_count > 0 and their_count > 0:
-                    continue  # заблокированная линия
-                
-                # Система очков
-                if our_count == 3 and empty_count == 1:
-                    # Проверяем, реально ли мы можем сделать выигрышный ход
-                    if self.can_complete_line(board, line, player):
-                        score += 1000  # очень сильная позиция
-                elif their_count == 3 and empty_count == 1:
-                    if self.can_complete_line(board, line, opponent):
-                        score -= 1000  # нужно блокировать
-                elif our_count == 2 and empty_count == 2:
-                    score += 100
-                elif their_count == 2 and empty_count == 2:
-                    score -= 100
-                elif our_count == 1 and empty_count == 3:
-                    score += 10
-                elif their_count == 1 and empty_count == 3:
-                    score -= 10
+            
+            current_player = 3 - current_player
         
-        return score
+        return 0  # ничья если не завершилось
 
-    def can_complete_line(self, board: List[List[List[int]]], line: List[Tuple[int, int, int]], player: int) -> bool:
-        """Проверяет, можем ли мы реально завершить линию (учитывает гравитацию)"""
-        for x, y, z in line:
-            if board[z][y][x] == 0:  # пустая позиция
-                # Проверяем, можем ли мы туда реально поставить фишку
-                expected_z = self.get_drop_position(board, x, y)
-                if expected_z == z:
-                    return True
-        return False
-
-    def get_all_possible_lines(self) -> List[List[Tuple[int, int, int]]]:
-        """Получает все возможные выигрышные линии"""
-        lines = []
+    def smart_random_action(self, state, actions, player):
+        """Улучшенный случайный ход с приоритетом центру"""
         
-        # 1. Вертикальные
-        for x in range(4):
-            for y in range(4):
-                lines.append([(x, y, z) for z in range(4)])
+        # Сначала проверяем немедленные выигрыши/блокировки
+        for x, y in actions:
+            # Пробуем выиграть
+            temp_state = [[[cell for cell in row] for row in level] for level in state]
+            for z in range(4):
+                if temp_state[z][y][x] == 0:
+                    temp_state[z][y][x] = player
+                    if self.check_winner_state(temp_state) == player:
+                        return (x, y)
+                    temp_state[z][y][x] = 0
+                    break
+            
+            # Пробуем заблокировать
+            temp_state = [[[cell for cell in row] for row in level] for level in state]
+            for z in range(4):
+                if temp_state[z][y][x] == 0:
+                    temp_state[z][y][x] = 3 - player
+                    if self.check_winner_state(temp_state) == (3 - player):
+                        return (x, y)
+                    temp_state[z][y][x] = 0
+                    break
         
-        # 2. Горизонтальные в плоскости XY
-        for z in range(4):
-            # По X
-            for y in range(4):
-                for x in range(1):  # начинаем с x=0, берём 4 подряд
-                    lines.append([(x+i, y, z) for i in range(4)])
-            # По Y
-            for x in range(4):
-                for y in range(1):  # начинаем с y=0, берём 4 подряд
-                    lines.append([(x, y+i, z) for i in range(4)])
-        
-        # 3. Диагонали в плоскости XY
-        for z in range(4):
-            lines.append([(i, i, z) for i in range(4)])
-            lines.append([(i, 3-i, z) for i in range(4)])
-        
-        # 4. Диагонали в плоскости XZ
-        for y in range(4):
-            lines.append([(i, y, i) for i in range(4)])
-            lines.append([(i, y, 3-i) for i in range(4)])
-        
-        # 5. Диагонали в плоскости YZ
-        for x in range(4):
-            lines.append([(x, i, i) for i in range(4)])
-            lines.append([(x, i, 3-i) for i in range(4)])
-        
-        # 6. Пространственные диагонали
-        lines.append([(i, i, i) for i in range(4)])
-        lines.append([(i, i, 3-i) for i in range(4)])
-        lines.append([(i, 3-i, i) for i in range(4)])
-        lines.append([(3-i, i, i) for i in range(4)])
-        
-        return lines
-
-    def get_position_bonus(self, x: int, y: int, z: int) -> int:
-        """Бонусы за позицию"""
-        bonus = 0
-        
-        # Центр важнее краёв
-        center_distance = abs(x - 1.5) + abs(y - 1.5)
-        bonus += int((3 - center_distance) * 10)
-        
-        # Более высокие позиции могут быть полезны для блокировки
-        bonus += z * 2
-        
-        return bonus
-
-    def safe_fallback_move(self, board: List[List[List[int]]]) -> Tuple[int, int]:
-        """Безопасный запасной ход"""
         # Приоритет центральным позициям
-        preferred_moves = [
-            (1, 1), (2, 2), (1, 2), (2, 1),  # центр
-            (1, 0), (2, 0), (0, 1), (0, 2),  # околоцентральные
-            (3, 1), (3, 2), (1, 3), (2, 3),
-            (0, 0), (3, 0), (0, 3), (3, 3)   # углы
-        ]
+        center_actions = [(x, y) for x, y in actions if 1 <= x <= 2 and 1 <= y <= 2]
+        if center_actions:
+            return random.choice(center_actions)
         
-        for x, y in preferred_moves:
-            if self.get_drop_position(board, x, y) is not None:
-                return (x, y)
-        
-        # Любой доступный ход
-        for x in range(4):
-            for y in range(4):
-                if self.get_drop_position(board, x, y) is not None:
-                    return (x, y)
-        
-        return (0, 0)
+        return random.choice(actions)
 
-    def emergency_move(self, board: List[List[List[int]]]) -> Tuple[int, int]:
-        """Экстренный ход при ошибках"""
-        return (1, 1)
+    def backpropagate(self, node: MCTSNode, result: int, original_player: int):
+        """BACKPROPAGATION: распространяем результат вверх по дереву"""
+        
+        while node is not None:
+            node.visits += 1
+            
+            # Считаем выигрыш с точки зрения original_player
+            if result == original_player:
+                node.wins += 1.0
+            elif result == 0:
+                node.wins += 0.5  # ничья = половина очка
+            # иначе поражение = 0 очков
+            
+            node = node.parent
+
+    # Вспомогательные функции
+    
+    def find_immediate_win(self, board: List[List[List[int]]], player: int) -> Optional[Tuple[int, int]]:
+        """Поиск немедленного выигрыша"""
+        try:
+            for x in range(4):
+                for y in range(4):
+                    if self.can_place_piece(board, x, y):
+                        # Пробуем ход
+                        temp_board = [[[cell for cell in row] for row in level] for level in board]
+                        for z in range(4):
+                            if temp_board[z][y][x] == 0:
+                                temp_board[z][y][x] = player
+                                if self.check_winner_state(temp_board) == player:
+                                    return (x, y)
+                                break
+            return None
+        except:
+            return None
+
+    def can_place_piece(self, board: List[List[List[int]]], x: int, y: int) -> bool:
+        """Можно ли поставить фишку"""
+        try:
+            for z in range(4):
+                if board[z][y][x] == 0:
+                    return True
+            return False
+        except:
+            return False
+
+    def is_first_move(self, board: List[List[List[int]]]) -> bool:
+        """Проверяет, первый ли это ход в игре"""
+        try:
+            count = 0
+            for x in range(4):
+                for y in range(4):
+                    for z in range(4):
+                        if board[z][y][x] != 0:
+                            count += 1
+            return count == 0
+        except:
+            return False
+
+    def get_current_player(self, state: List[List[List[int]]]) -> int:
+        """Определяет, кто ходит сейчас"""
+        try:
+            count1 = 0
+            count2 = 0
+            for x in range(4):
+                for y in range(4):
+                    for z in range(4):
+                        if state[z][y][x] == 1:
+                            count1 += 1
+                        elif state[z][y][x] == 2:
+                            count2 += 1
+            return 1 if count1 == count2 else 2
+        except:
+            return 1
+
+    def check_winner_state(self, state: List[List[List[int]]]) -> Optional[int]:
+        """Проверка победителя для состояния"""
+        try:
+            # Вертикальные линии
+            for x in range(4):
+                for y in range(4):
+                    if state[0][y][x] != 0:
+                        if all(state[z][y][x] == state[0][y][x] for z in range(4)):
+                            return state[0][y][x]
+            
+            # Горизонтальные X
+            for z in range(4):
+                for y in range(4):
+                    for start_x in range(1):
+                        if state[z][y][start_x] != 0:
+                            if all(state[z][y][start_x + i] == state[z][y][start_x] for i in range(4)):
+                                return state[z][y][start_x]
+            
+            # Горизонтальные Y  
+            for z in range(4):
+                for x in range(4):
+                    for start_y in range(1):
+                        if state[z][start_y][x] != 0:
+                            if all(state[z][start_y + i][x] == state[z][start_y][x] for i in range(4)):
+                                return state[z][start_y][x]
+            
+            # Диагонали XY
+            for z in range(4):
+                if state[z][0][0] != 0:
+                    if all(state[z][i][i] == state[z][0][0] for i in range(4)):
+                        return state[z][0][0]
+                if state[z][0][3] != 0:
+                    if all(state[z][i][3-i] == state[z][0][3] for i in range(4)):
+                        return state[z][0][3]
+            
+            # 3D диагонали
+            if state[0][0][0] != 0:
+                if all(state[i][i][i] == state[0][0][0] for i in range(4)):
+                    return state[0][0][0]
+            
+            return None
+        except:
+            return None
+
+    def get_legal_actions_state(self, state: List[List[List[int]]]) -> List[Tuple[int, int]]:
+        """Получить доступные ходы для состояния"""
+        try:
+            actions = []
+            for x in range(4):
+                for y in range(4):
+                    for z in range(4):
+                        if state[z][y][x] == 0:
+                            actions.append((x, y))
+                            break
+            return actions
+        except:
+            return [(1, 1), (2, 2)]
+
+    def safe_fallback(self, board: List[List[List[int]]]) -> Tuple[int, int]:
+        """Безопасный запасной ход"""
+        try:
+            safe_moves = [(1, 1), (2, 2), (1, 2), (2, 1), (0, 0), (3, 3)]
+            
+            for x, y in safe_moves:
+                if self.can_place_piece(board, x, y):
+                    return (x, y)
+            
+            # Любой доступный ход
+            for x in range(4):
+                for y in range(4):
+                    if self.can_place_piece(board, x, y):
+                        return (x, y)
+            
+            return (0, 0)
+        except:
+            return (0, 0)
