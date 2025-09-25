@@ -10,224 +10,233 @@ class MyAI(Alg3D):
         self,
         board: List[List[List[int]]], # 3D доска [z][y][x], 0=пусто, 1=игрок1, 2=игрок2
         player: int, # 1=мы(чёрные), 2=противник(белые)
-        last_move: Tuple[int, int, int] # последний ход (x, y, z)
+        last_move: Tuple[int, int, int] # последний ход (x, y, z) - может быть None!
     ) -> Tuple[int, int]:
         """3D Connect 4 ИИ - возвращает лучший ход (x, y)"""
         
-        # 1. Выигрываем за 1 ход, если возможно
-        winning_move = self.find_winning_move(board, player)
-        if winning_move:
-            return winning_move
+        try:
+            # Безопасная обработка last_move
+            if last_move is None or last_move == (None, None, None):
+                last_move = (-1, -1, -1)  # Безопасное значение для первого хода
             
-        # 2. Блокируем выигрыш противника
-        opponent = 3 - player
-        blocking_move = self.find_winning_move(board, opponent)
-        if blocking_move:
-            return blocking_move
+            # 1. Выигрываем за 1 ход, если возможно
+            winning_move = self.find_winning_move(board, player)
+            if winning_move:
+                return winning_move
+                
+            # 2. Блокируем выигрыш противника
+            opponent = 3 - player
+            blocking_move = self.find_winning_move(board, opponent)
+            if blocking_move:
+                return blocking_move
+                
+            # 3. Быстрый поиск оптимального хода (уменьшена глубина)
+            best_move = self.smart_move_selection(board, player)
+            return best_move
             
-        # 3. Минимакс поиск оптимального хода
-        best_move = self.minimax_search(board, player)
-        return best_move if best_move else self.get_fallback_move(board)
+        except Exception as e:
+            # Экстренный безопасный ход при любой ошибке
+            return self.emergency_move(board)
 
     def find_winning_move(self, board: List[List[List[int]]], player: int) -> Tuple[int, int]:
         """Поиск немедленного выигрыша"""
-        for x in range(4):
-            for y in range(4):
-                drop_z = self.get_drop_position(board, x, y)
-                if drop_z is not None:
-                    board[drop_z][y][x] = player
-                    if self.check_win_from_position(board, x, y, drop_z, player):
+        try:
+            for x in range(4):
+                for y in range(4):
+                    drop_z = self.get_drop_position(board, x, y)
+                    if drop_z is not None:
+                        board[drop_z][y][x] = player
+                        if self.check_win_from_position(board, x, y, drop_z, player):
+                            board[drop_z][y][x] = 0
+                            return (x, y)
                         board[drop_z][y][x] = 0
-                        return (x, y)
-                    board[drop_z][y][x] = 0
-        return None
+            return None
+        except:
+            return None
 
     def get_drop_position(self, board: List[List[List[int]]], x: int, y: int) -> int:
         """Определяет высоту падения фишки"""
-        for z in range(4):
-            if board[z][y][x] == 0:
-                return z
-        return None
-
-    def minimax_search(self, board: List[List[List[int]]], player: int) -> Tuple[int, int]:
-        """Минимакс с альфа-бета отсечением"""
-        best_score = float('-inf')
-        best_move = None
-        
-        valid_moves = self.get_valid_moves(board)
-        if not valid_moves:
+        try:
+            if x < 0 or x >= 4 or y < 0 or y >= 4:
+                return None
+            for z in range(4):
+                if board[z][y][x] == 0:
+                    return z
             return None
-        
-        # Сортируем ходы по приоритету (центр важнее)
-        valid_moves.sort(key=lambda move: abs(move[0]-1.5) + abs(move[1]-1.5))
-        
-        for x, y in valid_moves:
+        except:
+            return None
+
+    def smart_move_selection(self, board: List[List[List[int]]], player: int) -> Tuple[int, int]:
+        """Умный выбор хода без глубокой рекурсии"""
+        try:
+            valid_moves = self.get_valid_moves(board)
+            if not valid_moves:
+                return self.emergency_move(board)
+            
+            # Оцениваем каждый ход простым способом
+            best_move = None
+            best_score = float('-inf')
+            
+            for x, y in valid_moves:
+                score = self.evaluate_move_simple(board, x, y, player)
+                if score > best_score:
+                    best_score = score
+                    best_move = (x, y)
+            
+            return best_move if best_move else valid_moves[0]
+        except:
+            return self.emergency_move(board)
+
+    def evaluate_move_simple(self, board, x, y, player):
+        """Простая оценка хода без рекурсии"""
+        try:
             drop_z = self.get_drop_position(board, x, y)
             if drop_z is None:
-                continue
+                return -1000
                 
+            score = 0
+            
+            # Приоритет центральным позициям
+            center_bonus = 10 - (abs(x - 1.5) + abs(y - 1.5)) * 2
+            score += center_bonus
+            
+            # Бонус за высоту (выше = лучше для блокировки)
+            height_bonus = drop_z * 5
+            score += height_bonus
+            
+            # Проверяем, создаёт ли ход угрозы
             board[drop_z][y][x] = player
-            score = self.minimax(board, 3, False, player, float('-inf'), float('inf'))
+            threats = self.count_threats(board, player)
             board[drop_z][y][x] = 0
+            score += threats * 50
             
-            if score > best_score:
-                best_score = score
-                best_move = (x, y)
-                
-        return best_move
-
-    def minimax(self, board, depth, is_maximizing, original_player, alpha, beta):
-        """Рекурсивный минимакс"""
-        if depth == 0:
-            return self.evaluate_position(board, original_player)
-            
-        game_result = self.check_game_winner(board)
-        if game_result == original_player:
-            return 10000
-        elif game_result == (3 - original_player):
-            return -10000
-        elif game_result == 0:
+            return score
+        except:
             return 0
-        
-        current_player = original_player if is_maximizing else (3 - original_player)
-        valid_moves = self.get_valid_moves(board)
-        
-        if not valid_moves:
-            return self.evaluate_position(board, original_player)
-            
-        if is_maximizing:
-            max_score = float('-inf')
-            for x, y in valid_moves:
-                drop_z = self.get_drop_position(board, x, y)
-                if drop_z is None:
-                    continue
-                    
-                board[drop_z][y][x] = current_player
-                score = self.minimax(board, depth-1, False, original_player, alpha, beta)
-                board[drop_z][y][x] = 0
-                
-                max_score = max(max_score, score)
-                alpha = max(alpha, score)
-                if beta <= alpha:
-                    break
-            return max_score
-        else:
-            min_score = float('inf')
-            for x, y in valid_moves:
-                drop_z = self.get_drop_position(board, x, y)
-                if drop_z is None:
-                    continue
-                    
-                board[drop_z][y][x] = current_player
-                score = self.minimax(board, depth-1, True, original_player, alpha, beta)
-                board[drop_z][y][x] = 0
-                
-                min_score = min(min_score, score)
-                beta = min(beta, score)
-                if beta <= alpha:
-                    break
-            return min_score
 
-    def evaluate_position(self, board: List[List[List[int]]], player: int) -> int:
-        """Оценка позиции"""
-        score = 0
-        opponent = 3 - player
-        
-        for line in self.get_all_lines():
-            player_count = sum(1 for x,y,z in line if board[z][y][x] == player)
-            opponent_count = sum(1 for x,y,z in line if board[z][y][x] == opponent)
-            empty_count = sum(1 for x,y,z in line if board[z][y][x] == 0)
+    def count_threats(self, board, player):
+        """Подсчёт количества угроз (3 в ряд + пустое место)"""
+        try:
+            threats = 0
+            for line in self.get_key_lines():
+                player_count = 0
+                empty_count = 0
+                
+                for x, y, z in line:
+                    if x < 0 or x >= 4 or y < 0 or y >= 4 or z < 0 or z >= 4:
+                        continue
+                    cell = board[z][y][x]
+                    if cell == player:
+                        player_count += 1
+                    elif cell == 0:
+                        empty_count += 1
+                    else:
+                        break  # есть фишки противника
+                
+                if player_count == 3 and empty_count == 1:
+                    threats += 1
             
-            if player_count > 0 and opponent_count > 0:
-                continue  # заблокированная линия
-                
-            if player_count == 3 and empty_count == 1:
-                score += 500
-            elif opponent_count == 3 and empty_count == 1:
-                score -= 500
-            elif player_count == 2 and empty_count == 2:
-                score += 50
-            elif opponent_count == 2 and empty_count == 2:
-                score -= 50
-            elif player_count == 1 and empty_count == 3:
-                score += 5
-            elif opponent_count == 1 and empty_count == 3:
-                score -= 5
-                
-        return score
+            return threats
+        except:
+            return 0
 
-    def get_all_lines(self):
-        """Все выигрышные линии"""
+    def get_key_lines(self):
+        """Основные выигрышные линии (сокращённый список)"""
         lines = []
         
-        # Горизонтальные в XY плоскостях
-        for z in range(4):
-            for y in range(4):
-                for x in range(1):
-                    lines.append([(x+i, y, z) for i in range(4)])
+        # Только самые важные линии для скорости
+        try:
+            # Вертикальные по Z (самые важные)
             for x in range(4):
-                for y in range(1):
-                    lines.append([(x, y+i, z) for i in range(4)])
-        
-        # Вертикальные по Z
-        for x in range(4):
-            for y in range(4):
-                lines.append([(x, y, z) for z in range(4)])
-        
-        # Диагонали XY
-        for z in range(4):
-            lines.append([(i, i, z) for i in range(4)])
-            lines.append([(i, 3-i, z) for i in range(4)])
-        
-        # Диагонали XZ
-        for y in range(4):
-            lines.append([(i, y, i) for i in range(4)])
-            lines.append([(i, y, 3-i) for i in range(4)])
-        
-        # Диагонали YZ
-        for x in range(4):
-            lines.append([(x, i, i) for i in range(4)])
-            lines.append([(x, i, 3-i) for i in range(4)])
-        
-        # 3D диагонали
-        lines.append([(i, i, i) for i in range(4)])
-        lines.append([(i, i, 3-i) for i in range(4)])
-        lines.append([(i, 3-i, i) for i in range(4)])
-        lines.append([(3-i, i, i) for i in range(4)])
-        
+                for y in range(4):
+                    lines.append([(x, y, z) for z in range(4)])
+            
+            # Горизонтальные в центральных плоскостях
+            for z in [1, 2]:  # только средние уровни
+                for y in range(4):
+                    for x in range(1):
+                        lines.append([(x+i, y, z) for i in range(4)])
+                for x in range(4):
+                    for y in range(1):
+                        lines.append([(x, y+i, z) for i in range(4)])
+            
+            # Основные диагонали
+            lines.append([(i, i, i) for i in range(4)])  # главная диагональ
+            lines.append([(i, i, 3-i) for i in range(4)])
+            
+        except:
+            pass
+            
         return lines
 
     def check_win_from_position(self, board, x, y, z, player):
         """Проверка победы от позиции"""
-        for line in self.get_all_lines():
-            if (x, y, z) in line:
-                if all(board[lz][ly][lx] == player for lx, ly, lz in line):
-                    return True
-        return False
-
-    def check_game_winner(self, board):
-        """Проверка победителя"""
-        for line in self.get_all_lines():
-            first_pos = line[0]
-            first_cell = board[first_pos[2]][first_pos[1]][first_pos[0]]
-            if first_cell != 0:
-                if all(board[z][y][x] == first_cell for x, y, z in line):
-                    return first_cell
-        
-        if not self.get_valid_moves(board):
-            return 0  # ничья
-        return None
+        try:
+            # Быстрая проверка только ключевых направлений
+            directions = [
+                # Вертикаль по Z
+                [(x, y, z+dz) for dz in range(-3, 1)],
+                [(x, y, z+dz) for dz in range(-2, 2)],
+                [(x, y, z+dz) for dz in range(-1, 3)],
+                [(x, y, z+dz) for dz in range(0, 4)],
+                # Горизонталь по X
+                [(x+dx, y, z) for dx in range(-3, 1)],
+                [(x+dx, y, z) for dx in range(-2, 2)],
+                [(x+dx, y, z) for dx in range(-1, 3)],
+                [(x+dx, y, z) for dx in range(0, 4)],
+                # Горизонталь по Y
+                [(x, y+dy, z) for dy in range(-3, 1)],
+                [(x, y+dy, z) for dy in range(-2, 2)],
+                [(x, y+dy, z) for dy in range(-1, 3)],
+                [(x, y+dy, z) for dy in range(0, 4)],
+            ]
+            
+            for line in directions:
+                if len(line) == 4:
+                    valid_line = True
+                    for lx, ly, lz in line:
+                        if lx < 0 or lx >= 4 or ly < 0 or ly >= 4 or lz < 0 or lz >= 4:
+                            valid_line = False
+                            break
+                        if board[lz][ly][lx] != player:
+                            valid_line = False
+                            break
+                    if valid_line:
+                        return True
+            
+            return False
+        except:
+            return False
 
     def get_valid_moves(self, board):
         """Доступные ходы"""
-        moves = []
-        for x in range(4):
-            for y in range(4):
-                if self.get_drop_position(board, x, y) is not None:
-                    moves.append((x, y))
-        return moves
+        try:
+            moves = []
+            for x in range(4):
+                for y in range(4):
+                    if self.get_drop_position(board, x, y) is not None:
+                        moves.append((x, y))
+            return moves
+        except:
+            return [(1, 1), (1, 2), (2, 1), (2, 2)]  # запасные центральные ходы
 
-    def get_fallback_move(self, board):
-        """Запасной ход"""
-        valid_moves = self.get_valid_moves(board)
-        return valid_moves[0] if valid_moves else (0, 0)
+    def emergency_move(self, board):
+        """Экстренный безопасный ход"""
+        try:
+            # Пробуем центральные позиции
+            safe_moves = [(1, 1), (1, 2), (2, 1), (2, 2), (0, 0), (0, 1), (1, 0)]
+            
+            for x, y in safe_moves:
+                if 0 <= x < 4 and 0 <= y < 4:
+                    if self.get_drop_position(board, x, y) is not None:
+                        return (x, y)
+            
+            # Последняя попытка - любой валидный ход
+            for x in range(4):
+                for y in range(4):
+                    if self.get_drop_position(board, x, y) is not None:
+                        return (x, y)
+            
+            return (0, 0)  # совсем крайний случай
+        except:
+            return (0, 0)
